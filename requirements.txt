@@ -1,0 +1,5 @@
+chardet>=7.4.3
+openai>=2.38.0
+prompt_toolkit>=3.0.52
+python-dotenv>=1.2.2
+rich>=15.0.0
