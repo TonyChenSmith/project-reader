@@ -2,7 +2,7 @@
 一个基于 AI 的项目阅读与分析交互工具。
 @author Tony Chen Smith
 @date 2026-05-25
-@version 1.1.1
+@version 1.1.2
 """
 import chardet
 import logging
@@ -372,7 +372,7 @@ def find_files(glob:str,dir:str=".",limit:int=50)->str:
 
     return f"find:[{','.join(results)}]"
 
-def get_file_info(path:str)->str:
+def get_path_info(path:str)->str:
     """
     获取文件或目录的详细信息。返回格式为info:{path:相对路径,type:text/binary/directory/not_found,size:字节数,last:YYYY-MM-DD HH:MM:SS}。
     文本文件额外含lines:行数与encoding:编码，目录额外含entries:直接子条目数。路径不存在则type为not_found。
@@ -434,7 +434,7 @@ tool_func={
     "search_files":search_files,
     "search_content":search_content,
     "find_files":find_files,
-    "get_file_info":get_file_info,
+    "get_path_info":get_path_info,
     "get_project_root":get_project_root,
     "get_self_path":get_self_path
 }
@@ -634,7 +634,7 @@ tools=[
         "type":"function",
         "function":
         {
-            "name":"get_file_info",
+            "name":"get_path_info",
             "description":"获取文件或目录的详细信息。返回格式为info:{path:相对路径,type:text/binary/directory/not_found,size:字节数,last:YYYY-MM-DD HH:MM:SS}。文本文件额外含lines:行数与encoding:编码，目录额外含entries:直接子条目数。路径不存在则type为not_found。",
             "parameters":
             {
@@ -793,11 +793,16 @@ def stream_response(history,console,logger,client,question):
                 for tc in assistant["tool_calls"]:
                     func=tool_func[tc["function"]["name"]]
                     args=json.loads(tc["function"]["arguments"]) if tc["function"]["arguments"] else {}
-                    if count<128:
-                        result=func(**args)
-                    else:
-                        result="已达到最大工具调用次数，请不要再尝试调用工具。"
                     console.print(f"id:{tc['id']},function:{tc['function']['name']},arguments:{args}",style="blue")
+                    if count>=128:
+                        result="error:已达到最大工具调用次数，请不要再尝试调用工具。"
+                    else:
+                        try:
+                            result=func(**args)
+                        except TypeError as e:
+                            result=f"error:工具{tc['function']['name']}参数不匹配：{e}，传入参数：{args}。"
+                        except Exception as e:
+                            result=f"error:工具{tc['function']['name']}执行异常：{e}。"
                     logger.info(f"id:{tc['id']},function:{tc['function']['name']},arguments:{args},result:{result}",extra={"role":"S"})
                     messages.append({"role":"tool","tool_call_id":tc["id"],"content":result})
                 
@@ -811,7 +816,6 @@ message_prompt={
     "role":"system",
     "content":(
         "你是一个中文助手。思考和回答输出应尽量全用简体中文。"
-        "考虑读取文件安全，调用 read_text_file 或 search_content 前，必须先调 get_file_info 探路。"
         "每次寻找依据请优先查找实际文件，你读取的文件是可以在你会话期间改变的。非全文检查请多用搜索，少读全文。"
     )
 }

@@ -32,7 +32,7 @@ AI 可调用的 9 个函数：
 | `search_files` | 按正则搜索文件名/内容 | `pattern`, `dir`, `glob`, `limit` |
 | `search_content` | 在文件内搜索匹配行 | `pattern`, `file`, `start`, `n`, `context` |
 | `find_files` | 按 glob 模式查找文件 | `glob`, `dir`, `limit` |
-| `get_file_info` | 获取文件/目录详情 | `path` |
+| `get_path_info` | 获取文件/目录详情 | `path` |
 | `get_project_root` | 获取项目根路径 | — |
 | `get_self_path` | 获取 reader.py 自身路径 | — |
 
@@ -138,12 +138,6 @@ python reader.py /path/to/target/project
 > **上传公开仓库前请删除 `.env` 中的 API Key！**
 >
 > 该项目已在 `.gitignore` 中排除了 `.env` 和 `log/` 目录，但仍请在上传前确认。
-
-## 📝 更新日志
-
-- **2026-05-25** — 初始版本
-- **2026-05-30** — v1.0 正式版，功能完备
-- **2026-05-31** — 优化提示词，要求 AI 优先检查记忆并读取文件；调整单次读取行数
 
 ## 📄 许可证
 
