@@ -2,7 +2,7 @@
 一个基于 AI 的项目阅读与分析交互工具。
 @author Tony Chen Smith
 @date 2026-05-25
-@version 1.1.2
+@version 1.2.0
 """
 import chardet
 import logging
@@ -39,7 +39,9 @@ log_tags={
 root=Path.cwd()
 
 class ReaderFormatter(logging.Formatter):
-    """阅读日志格式器"""
+    """
+    阅读日志格式器。
+    """
     def formatTime(self,record,datefmt=None):
         ct=datetime.fromtimestamp(record.created)
         return ct.strftime("%Y-%m-%d %H:%M:%S")+f":{ct.microsecond//1000:03d}"
@@ -680,12 +682,16 @@ tools=[
 ]
 
 def stream_display(response,console,logger):
-    """流式读取并输出到控制台和日志。"""
+    """
+    流式读取并输出到控制台和日志。、
+    """
     reasoning_content=""
     content=""
     calls_dict={}
     has_reasoning=False
     has_content=False
+    tokens=0
+
     try:
         for chunk in response:
             delta=chunk.choices[0].delta
@@ -725,6 +731,8 @@ def stream_display(response,console,logger):
                         calls_dict[idx]["name"]=tool_call_delta.function.name
                     if tool_call_delta.function and tool_call_delta.function.arguments:
                         calls_dict[idx]["arguments"]+=tool_call_delta.function.arguments
+            if hasattr(chunk,"usage") and chunk.usage:
+                tokens=chunk.usage.total_tokens
     except Exception as e:
         if has_reasoning and not has_content:
             logger.info(reasoning_content,extra={"role":"T"})
@@ -738,7 +746,7 @@ def stream_display(response,console,logger):
         console.print(f"{einfo}",style="red")
         logger.error("===出现错误===",extra={"role":"S"})
         logger.error(f"{einfo}",extra={"role":"S"})
-        return None,e
+        return None,e,tokens
 
     console.print()
     if has_content:
@@ -760,14 +768,17 @@ def stream_display(response,console,logger):
                     "arguments":tc["arguments"]
                 }
             })
-        return {"role":"assistant","content":content,"reasoning_content":reasoning_content,"tool_calls":tool_calls_list},None
+        return {"role":"assistant","content":content,"reasoning_content":reasoning_content,"tool_calls":tool_calls_list},None,tokens
     else:
-        return {"role":"assistant","content":content,"reasoning_content":reasoning_content},None
+        return {"role":"assistant","content":content,"reasoning_content":reasoning_content},None,tokens
 
 def stream_response(history,console,logger,client,question):
-    """发起一次流式请求。"""
+    """
+    发起一次流式请求。
+    """
     messages=history.copy()
     messages.append({"role":"user","content":question})
+    total_token=0
 
     count=0
     while True:
@@ -777,13 +788,15 @@ def stream_response(history,console,logger,client,question):
             stream=True,
             reasoning_effort="high",
             extra_body={"thinking":{"type":"enabled"}},
+            stream_options={"include_usage":True},
             tools=tools
         )
 
-        assistant,ex=stream_display(response,console,logger)
+        assistant,ex,tokens=stream_display(response,console,logger)
         if ex:
-            return None
+            return None,total_token
         else:
+            total_token=tokens
             messages.append(assistant)
 
             if assistant.get("tool_calls"):
@@ -794,8 +807,8 @@ def stream_response(history,console,logger,client,question):
                     func=tool_func[tc["function"]["name"]]
                     args=json.loads(tc["function"]["arguments"]) if tc["function"]["arguments"] else {}
                     console.print(f"id:{tc['id']},function:{tc['function']['name']},arguments:{args}",style="blue")
-                    if count>=128:
-                        result="error:已达到最大工具调用次数，请不要再尝试调用工具。"
+                    if count>=1024:
+                        result="error:已达到最大工具调用次数，不要再尝试调用工具。"
                     else:
                         try:
                             result=func(**args)
@@ -808,7 +821,76 @@ def stream_response(history,console,logger,client,question):
                 
                 count=count+1
             else:
-                return messages
+                return messages,total_token
+
+token_limit=750000
+keep_last=3
+
+def summary_message(console,logger,client,message,tokens):
+    """
+    总结消息，如不符合条件还是放弃总结。
+    """
+    if tokens<=token_limit:
+        return message
+    sys_msgs=[]
+    index=0
+    while index<len(message) and message[index]["role"]=="system":
+        sys_msgs.append(message[index])
+        index+=1
+    
+    rounds=[]
+    current=[]
+    for msg in message[index:]:
+        if msg["role"]=="user"and current:
+            rounds.append(current)
+            current=[]
+        current.append(msg)
+    if current:
+        rounds.append(current)
+    
+    if len(rounds)<=keep_last:
+        # 放弃总结
+        return message
+    
+    middle=rounds[:-keep_last]
+    last=rounds[-keep_last:]
+
+    summary_messages=list(sys_msgs)
+    for r in middle:
+        summary_messages.extend(r)
+    summary_messages.append({"role":"user","content":"请对以上对话历史做简洁摘要，要求尽可能传达所有变动点，保留关键决策、代码变更和未解决的问题。"})
+
+    console.print(Rule("[yellow]消息总结[/yellow]", style="yellow"))
+    logger.info("===消息总结===",extra={"role": "S"})
+
+    try:
+        summary_resp=client.chat.completions.create(
+            model="deepseek-v4-pro",
+            messages=summary_messages,
+            max_tokens=8196,
+            stream=True,
+        )
+        summary=""
+        for chunk in summary_resp:
+            if chunk.choices and chunk.choices[0].delta.content:
+                content=chunk.choices[0].delta.content
+                summary+=content
+                console.print(content,style="yellow",end="")
+        console.print()
+        logger.info(f"{summary}",extra={"role":"S"})
+    except Exception as e:
+        console.print()
+        einfo=traceback.format_exc()
+        console.print(f"总结失败：{einfo}",style="yellow")
+        logger.info(f"总结失败：{einfo}",extra={"role":"S"})
+        return message
+    
+    result=list(sys_msgs)
+    result.append({"role":"user","content":f"【前序对话摘要，共{len(middle)}轮】{summary}"})
+    result.append({"role":"assistant","content":"已理解。"})
+    for r in last:
+        result.extend(r)
+    return result
 
 commands=["/help","/new","/repeat","/quit"]
 
@@ -821,10 +903,10 @@ message_prompt={
 }
 
 if __name__ == "__main__":
-    #控制台初始化
+    # 控制台初始化
     console=Console()
 
-    #日志初始化
+    # 日志初始化
     script_dir=Path(__file__).parent.resolve()
     log_dir=script_dir/"log"
     log_dir.mkdir(exist_ok=True)
@@ -835,7 +917,7 @@ if __name__ == "__main__":
     handler.setFormatter(ReaderFormatter())
     logger.addHandler(handler)
 
-    #参数处理
+    # 参数处理
     if len(sys.argv)>=2:
         raw_path=sys.argv[1]
         p=Path(raw_path)
@@ -850,11 +932,12 @@ if __name__ == "__main__":
     console.print("  /help   返回该会话帮助。\n  /new    创建新的会话。\n  /repeat 重复上一次提问。\n  /quit   退出程序。",style="yellow")
     logger.info("  /help   返回该会话帮助。\n  /new    创建新的会话。\n  /repeat 重复上一次提问。\n  /quit   退出程序。",extra={"role":"S"})
 
-    #API客户端初始化
+    # API客户端初始化
     client=OpenAI(api_key=os.getenv("DEEPSEEK_API_KEY",""),base_url="https://api.deepseek.com")
 
     history=[message_prompt]
     previous=None
+    total=0
 
     while True:
         console.print(Rule("[cyan]提问[/cyan]",style="cyan"))
@@ -882,14 +965,26 @@ if __name__ == "__main__":
                 logger.info("===重新提问===",extra={"role":"S"})
                 logger.info(f"{previous}",extra={"role":"S"})
 
-                result=stream_response(history,console,logger,client,previous)
+                history=summary_message(console,logger,client,history,total)
+                result,tokens=stream_response(history,console,logger,client,previous)
                 if result:
+                    ratio=tokens/token_limit
+                    color="red" if ratio>1 else ("yellow" if ratio>0.8 else "green")
+                    console.print(Rule(f"[{color}]会话用量 {tokens}/{token_limit} ({ratio:.2%})[/{color}]",style=color))
+                    logger.info(f"会话用量：{tokens}/{token_limit}({ratio:.2%})",extra={"role":"S"})
+                    total=tokens
                     history=result
         else:
             logger.info("===开始提问===",extra={"role":"S"})
             logger.info(f"{question}",extra={"role":"U"})
 
-            result=stream_response(history,console,logger,client,question)
+            history=summary_message(console,logger,client,history,total)
+            result,tokens=stream_response(history,console,logger,client,question)
             if result:
+                ratio=tokens/token_limit
+                color="red" if ratio>1 else ("yellow" if ratio>0.8 else "green")
+                console.print(Rule(f"[{color}]会话用量 {tokens}/{token_limit} ({ratio:.2%})[/{color}]",style=color))
+                logger.info(f"会话用量：{tokens}/{token_limit}({ratio:.2%})",extra={"role":"S"})
+                total=tokens
                 history=result
             previous=question
